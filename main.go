@@ -1,7 +1,6 @@
 package main
 
 import(
-    // "os/signal"
 	stdlog "log"
     "os"
     "github.com/op/go-logging"
@@ -13,6 +12,7 @@ import(
     "io/ioutil"
     "time"
     "streambot"
+    "math/rand"
 )
 
 var log = logging.MustGetLogger("streambot-test")
@@ -22,17 +22,13 @@ type Options struct {
     ConfigFilepath string `short:"c" long:"config" description:"File path of configuration file"`
 }
 
-// {
-// 	"create_channel_throttle": 100,
-// 	"subscribe_channel_throttle": 100,
-// 	"fetch_subscriptions_throttle": 100
-// }
 type TestConfiguration struct {
 	Host 						string 	`json:"host"`
 	CreateChannelThrottle 		uint16 	`json:"create_channel_throttle"`
 	SubscribeChannelThrottle 	uint16 	`json:"subscribe_channel_throttle"`
 	SampleRate					float64 `json:"sample_rate"`
-	GetSubscriptionThrottle 	uint16 `json:"get_subscription_throttle"`
+	GetSubscriptionThrottle 	uint16  `json:"get_subscription_throttle"`
+	NumWorkers					float64 `json:"num_workers"`
 }
 
 func(config *TestConfiguration) Valid() bool {
@@ -92,14 +88,6 @@ func main() {
 		log.Fatal("Unknown test runner `%s`", runner)
 	}
 	go runner.Start()
-	// c := make(chan os.Signal, 1)                                       
-	// signal.Notify(c, os.Interrupt)                                     
-	// go func() {                                                        
-	//   for sig := range c {                                             
-	//     log.Debug("Captured %v, stopping API server..", sig)
-	//     // runner.Stop()                                                
-	//   }                                                                
-	// }()
 	for {
 		time.Sleep(100 * time.Millisecond)
 	}
@@ -112,6 +100,7 @@ type Subscription struct {
 
 type TestRunner struct {
 	API						* streambot.API
+	Workers					[]*Worker
 	ChannelIds 				[]string
 	SubscribingChannelIds	[]string
 	StatConn 				net.Conn
@@ -128,6 +117,7 @@ func NewTestRunner(config *TestConfiguration) *TestRunner {
 	r.Config = config
 	r.ChannelSampler = streambot.NewSampler(config.SampleRate)
 	r.SubscriptionSampler = streambot.NewSampler(config.SampleRate)
+	r.Workers = []*Worker{}
 	conn, err := net.Dial("udp", ":8125")
 	if err != nil {
 		log.Error("Error when instantiate UDP statting connection: %v", err)
@@ -136,118 +126,126 @@ func NewTestRunner(config *TestConfiguration) *TestRunner {
 	return r
 }
 
-type run func()
 
-func Run(function run, throttle time.Duration) {
+func NewWorker(runner *TestRunner) *Worker {
+	return &Worker{runner}
+}
+
+type Worker struct {
+	Runner *TestRunner
+}
+
+func(w *Worker) Work() {
 	go func(){
-		dontStop := true
-		go func(){
-			for dontStop {
-				function()
-				time.Sleep(throttle)
+		for {
+			taskIdx := rand.Intn(3)
+			var throttle uint16
+			switch taskIdx {
+			case 0: 
+				w.Runner.CreateChannel()
+				throttle = w.Runner.Config.CreateChannelThrottle
+			case 1: 
+				w.Runner.CreateSubscription()
+				throttle = w.Runner.Config.SubscribeChannelThrottle
+			case 2: 
+				w.Runner.GetSubscriptions()
+				throttle = w.Runner.Config.GetSubscriptionThrottle
 			}
-		}()
-		// <- stop
-		// dontStop = false
+			time.Sleep(time.Duration(int64(throttle) * 1000 * 1000))
+			
+		}
 	}()
 }
 
-func (runner *TestRunner) StartChannelCreateBackgroundRunner() {
-	Run(func() {
-		channelName := uuid.New()
-		log.Debug(fmt.Sprintf("Create channel with name `%s`", channelName))
-		// Synchronous web service call
-		beforeDB := time.Now()	
-		id, err := runner.API.CreateChannel(channelName)
-		afterDB := time.Now()
-		// Calculate database call duration and track in statter
-		duration := afterDB.Sub(beforeDB)/time.Millisecond
-		log.Debug("CreateChannel took %d", duration)
-		statSigns := []string{}
-		if err != nil {
-			statSigns = append(statSigns, "test.TestRunner.errors.all")
-			statSigns = append(statSigns, "test.TestRunner.errors.NewChannel")
-			log.Fatalf("Error when create channel: %v", err)
-		} else {
-			statSigns = append(statSigns, "test.TestRunner.NewChannel")
-			runner.ChannelSampler.SampleId(id)
-		}
-		for _, statSign := range statSigns {
-			fmt.Fprintln(runner.StatConn, fmt.Sprintf("%s:1|c", statSign))
-		}
-	}, time.Duration(int64(runner.Config.CreateChannelThrottle) * 1000 * 1000))
+func (runner *TestRunner) CreateChannel() {
+	channelName := uuid.New()
+	log.Debug(fmt.Sprintf("Create channel with name `%s`", channelName))
+	// Synchronous web service call
+	beforeDB := time.Now()	
+	id, err := runner.API.CreateChannel(channelName)
+	afterDB := time.Now()
+	// Calculate database call duration and track in statter
+	duration := afterDB.Sub(beforeDB)/time.Millisecond
+	log.Debug("CreateChannel took %d", duration)
+	statSigns := []string{}
+	if err != nil {
+		statSigns = append(statSigns, "test.TestRunner.errors.all")
+		statSigns = append(statSigns, "test.TestRunner.errors.NewChannel")
+		log.Fatalf("Error when create channel: %v", err)
+	} else {
+		statSigns = append(statSigns, "test.TestRunner.NewChannel")
+		runner.ChannelSampler.SampleId(id)
+	}
+	for _, statSign := range statSigns {
+		fmt.Fprintln(runner.StatConn, fmt.Sprintf("%s:1|c", statSign))
+	}
 }
 
 /**
  * TODO: Make API respond "Not Allowed" for FromChannel == ToChannel!
  */
 
-func (runner *TestRunner) StartChannelSubscribeBackgroundRunner() {
-	Run(func() {
-		fromChannelId := runner.ChannelSampler.RandomSampledId()
-		toChannelId := runner.ChannelSampler.RandomSampledId()
-		if fromChannelId == "" || toChannelId == "" || fromChannelId == toChannelId {
-			return;
-		}
-		log.Debug(fmt.Sprintf("Create subscription from channel `%s` to channel `%s`", fromChannelId, toChannelId))
-		beforeDB := time.Now()	
-		err := runner.API.CreateSubscription(fromChannelId, toChannelId)
-		afterDB := time.Now()
-		// Calculate database call duration and track in statter
-		duration := afterDB.Sub(beforeDB)/time.Millisecond
-		log.Debug("CreateSubscription took %d", duration)
-		statSigns := []string{}
-		if err != nil {
-			statSigns = append(statSigns, "test.TestRunner.errors.all")
-			statSigns = append(statSigns, "test.TestRunner.errors.NewSubscription")
-		} else {
-			statSigns = append(statSigns, "test.TestRunner.NewSubscription")
-			runner.SubscriptionSampler.SampleId(fromChannelId)
-		}
-		for _, statSign := range statSigns {
-			fmt.Fprintln(runner.StatConn, fmt.Sprintf("%s:1|c", statSign))
-		}
-	}, time.Duration(int64(runner.Config.SubscribeChannelThrottle) * 1000 * 1000))
+func (runner *TestRunner) CreateSubscription() {
+	fromChannelId := runner.ChannelSampler.RandomSampledId()
+	toChannelId := runner.ChannelSampler.RandomSampledId()
+	if fromChannelId == "" || toChannelId == "" || fromChannelId == toChannelId {
+		return;
+	}
+	log.Debug(fmt.Sprintf("Create subscription from channel `%s` to channel `%s`", fromChannelId, toChannelId))
+	beforeDB := time.Now()	
+	err := runner.API.CreateSubscription(fromChannelId, toChannelId)
+	afterDB := time.Now()
+	// Calculate database call duration and track in statter
+	duration := afterDB.Sub(beforeDB)/time.Millisecond
+	log.Debug("CreateSubscription took %d", duration)
+	statSigns := []string{}
+	if err != nil {
+		statSigns = append(statSigns, "test.TestRunner.errors.all")
+		statSigns = append(statSigns, "test.TestRunner.errors.NewSubscription")
+	} else {
+		statSigns = append(statSigns, "test.TestRunner.NewSubscription")
+		runner.SubscriptionSampler.SampleId(fromChannelId)
+	}
+	for _, statSign := range statSigns {
+		fmt.Fprintln(runner.StatConn, fmt.Sprintf("%s:1|c", statSign))
+	}
 }
 
 
-func (runner *TestRunner) StartSubscriptionFetchBackgroundRunner() {
-	Run(func() {
-		id := runner.SubscriptionSampler.RandomSampledId()
-		if id == "" {
-			return
-		}
-		fmt.Println(fmt.Sprintf("Get subscriptions channel ID is %s", id))
-		channelIds, err := runner.API.GetSubscriptionsOfChannelWithId(id)
-		log.Debug(fmt.Sprintf("Get subscriptions of channel `%s`", id))
-		statSigns := []string{}
-		if err != nil {
-			log.Fatalf(fmt.Sprintf("Subscriptions of channel error `%v`", err))
-			statSigns = append(statSigns, "test.TestRunner.errors.all")
-			statSigns = append(statSigns, "test.TestRunner.errors.GetSubscriptions")
+func (runner *TestRunner) GetSubscriptions() {
+	id := runner.SubscriptionSampler.RandomSampledId()
+	if id == "" {
+		return
+	}
+	fmt.Println(fmt.Sprintf("Get subscriptions channel ID is %s", id))
+	channelIds, err := runner.API.GetSubscriptionsOfChannelWithId(id)
+	log.Debug(fmt.Sprintf("Get subscriptions of channel `%s`", id))
+	statSigns := []string{}
+	if err != nil {
+		log.Fatalf(fmt.Sprintf("Subscriptions of channel error `%v`", err))
+		statSigns = append(statSigns, "test.TestRunner.errors.all")
+		statSigns = append(statSigns, "test.TestRunner.errors.GetSubscriptions")
+	} else {
+		log.Debug(fmt.Sprintf("Subscriptions of channel `%v`", channelIds))
+		statSigns = append(statSigns, "test.TestRunner.GetSubscriptions")
+		if channelIds == nil {
+			statSigns = append(statSigns, "test.TestRunner.errors.GetSubscriptionsEmpty")
+		} else if len(channelIds) == 0 {
+			statSigns = append(statSigns, "test.TestRunner.errors.GetSubscriptionsZero")
 		} else {
-			log.Debug(fmt.Sprintf("Subscriptions of channel `%v`", channelIds))
-			statSigns = append(statSigns, "test.TestRunner.GetSubscriptions")
-			if channelIds == nil {
-				statSigns = append(statSigns, "test.TestRunner.errors.GetSubscriptionsEmpty")
-			} else if len(channelIds) == 0 {
-				statSigns = append(statSigns, "test.TestRunner.errors.GetSubscriptionsZero")
-			} else {
-				statSigns = append(statSigns, fmt.Sprintf("test.TestRunner.NumSubscriptions.%d", len(channelIds)))
-			}
+			statSigns = append(statSigns, fmt.Sprintf("test.TestRunner.NumSubscriptions.%d", len(channelIds)))
 		}
-		for _, statSign := range statSigns {
-			fmt.Fprintln(runner.StatConn, fmt.Sprintf("%s:1|c", statSign))
-		}
-	}, time.Duration(int64(runner.Config.GetSubscriptionThrottle) * 1000 * 1000))
+	}
+	for _, statSign := range statSigns {
+		fmt.Fprintln(runner.StatConn, fmt.Sprintf("%s:1|c", statSign))
+	}
 }
 
 func (runner *TestRunner) Start() {
-	log.Debug("Start")
-	go func() {
-
-	}()
-	go runner.StartChannelCreateBackgroundRunner()
-	go runner.StartChannelSubscribeBackgroundRunner()
-	go runner.StartSubscriptionFetchBackgroundRunner()
+	for i := 1;  i<=int(runner.Config.NumWorkers); i++ {
+		w := NewWorker(runner)
+		w.Work()
+		runner.Workers = append(runner.Workers, w)
+		time.Sleep(time.Duration(int64(rand.Intn(1000)) * 1000 * 1000))
+	}
 }

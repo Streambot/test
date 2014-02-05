@@ -1,0 +1,8 @@
+{
+	"host": "localhost:8080",
+	"sample_rate": 0.1,
+	"create_channel_throttle": 120,
+	"subscribe_channel_throttle": 100,
+	"get_subscription_throttle": 70,
+	"num_workers": 50
+}
