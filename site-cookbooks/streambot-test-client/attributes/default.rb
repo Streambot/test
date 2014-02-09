@@ -6,6 +6,7 @@ normal["go"] = {
 	:packages => [
 		"code.google.com/p/go-uuid/uuid",
 		"github.com/op/go-logging",
-		"github.com/jessevdk/go-flags"
+		"github.com/jessevdk/go-flags",
+		"github.com/mbiermann/go-cluster"
 	]
 }

@@ -3,7 +3,9 @@ package main
 import(
 	"net/http"
 	"fmt"
+	"os"
 	"code.google.com/p/go-uuid/uuid"
+    "github.com/jessevdk/go-flags"
 )
 
 func channels(w http.ResponseWriter, r *http.Request){
@@ -22,8 +24,28 @@ func channels(w http.ResponseWriter, r *http.Request){
 	fmt.Println("Served")
 }
 
+var port string
+
+type Options struct {
+    Port string `short:"p" long:"port" description:"Port the server should listen on"`
+}
+
+func init() {
+	var options Options
+	var parser = flags.NewParser(&options, flags.Default)
+    if _, err := parser.Parse(); err != nil {
+    	fmt.Println(fmt.Sprintf("Error when parsing arguments: %v", err))
+        os.Exit(1)
+    }
+    port = options.Port
+    if port == "" {
+    	fmt.Println("Missing port declaration. Should run with -p <port>.")
+    	os.Exit(1)
+    }
+}
+
 func main() {
 	http.HandleFunc("/v1/channels", channels)
 	http.HandleFunc("/v1/channels/", channels)
-	http.ListenAndServe(":8080", nil)
+	http.ListenAndServe(":"+port, nil)
 }

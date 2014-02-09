@@ -13,6 +13,7 @@ import(
     "time"
     "streambot"
     "math/rand"
+    "errors"
 )
 
 var log = logging.MustGetLogger("streambot-test")
@@ -23,16 +24,16 @@ type Options struct {
 }
 
 type TestConfiguration struct {
-	Host 						string 	`json:"host"`
-	CreateChannelThrottle 		uint16 	`json:"create_channel_throttle"`
-	SubscribeChannelThrottle 	uint16 	`json:"subscribe_channel_throttle"`
-	SampleRate					float64 `json:"sample_rate"`
-	GetSubscriptionThrottle 	uint16  `json:"get_subscription_throttle"`
-	NumWorkers					float64 `json:"num_workers"`
+	Hosts 						[]string 	`json:"hosts"`
+	CreateChannelThrottle 		uint16 		`json:"create_channel_throttle"`
+	SubscribeChannelThrottle 	uint16 		`json:"subscribe_channel_throttle"`
+	SampleRate					float64 	`json:"sample_rate"`
+	GetSubscriptionThrottle 	uint16  	`json:"get_subscription_throttle"`
+	NumWorkers					float64 	`json:"num_workers"`
 }
 
 func(config *TestConfiguration) Valid() bool {
-	return config.Host != "" && config.SampleRate > 0
+	return len(config.Hosts) > 0 && config.SampleRate > 0
 }
 
 func ReadConfig(file string) *TestConfiguration {
@@ -81,9 +82,11 @@ func init() {
 }
 
 func main() {
-
 	log.Debug(fmt.Sprintf("Main with config %v", config))
-	runner := NewTestRunner(config)
+	runner, err := NewTestRunner(config)
+	if err != nil {
+		log.Fatal("Unexpected error when intiializing test runner: %v", err)
+	}
 	if runner == nil {
 		log.Fatal("Unknown test runner `%s`", runner)
 	}
@@ -105,13 +108,18 @@ type TestRunner struct {
 	SubscribingChannelIds	[]string
 	StatConn 				net.Conn
 	Config					* TestConfiguration
-	ChannelSampler 				* streambot.Sampler
-	SubscriptionSampler 				* streambot.Sampler
+	ChannelSampler 			* streambot.Sampler
+	SubscriptionSampler 	* streambot.Sampler
 }
 
-func NewTestRunner(config *TestConfiguration) *TestRunner {
-	r := new(TestRunner)
-	r.API = streambot.NewAPI(config.Host)
+func NewTestRunner(config *TestConfiguration) (r *TestRunner, err error) {
+	api, err := streambot.NewAPI(config.Hosts)
+	if err != nil {
+		err = errors.New(fmt.Sprintf("Unexpected error when initializing test API client: %v", err))
+		return
+	}
+	r = new(TestRunner)
+	r.API = api
 	r.ChannelIds = []string{}
 	r.SubscribingChannelIds = []string{}
 	r.Config = config
@@ -123,7 +131,7 @@ func NewTestRunner(config *TestConfiguration) *TestRunner {
 		log.Error("Error when instantiate UDP statting connection: %v", err)
 	}
 	r.StatConn = conn
-	return r
+	return
 }
 
 

@@ -8,16 +8,24 @@ import(
 	"bytes"
 	"io/ioutil"
 	"time"
+	"net/url"
+	"github.com/mbiermann/go-cluster"
 )
 
-func NewAPI(host string) *API {
-	api := new(API)
-	api.Host = host
-	return api
+func NewAPI(hosts []string) (api *API, err error) {
+	config := &cluster.ClusterConfig{Hosts:hosts}
+	cluster, err := cluster.NewCluster(config)
+	if err != nil {
+		err = errors.New(fmt.Sprintf("Unexpected error when initializing Cluster client: %v", err))
+		return
+	}
+	api = new(API)
+	api.Cluster = cluster
+	return
 }
 
 type API struct {
-	Host 	string
+	Cluster *cluster.Cluster
 }
 
 type CreateChannelRequest struct {
@@ -29,7 +37,8 @@ type CreateChannelResponse struct {
 }
 
 func(api *API) CreateChannel(Name string) (id string, err error) {
-	url := fmt.Sprintf("http://%s/v1/channels", api.Host)
+	url := url.URL{}
+	url.Path = "/v1/channels"
 	reqData := &CreateChannelRequest{Name}
 	buf, err := json.Marshal(reqData)
 	if err != nil {
@@ -37,17 +46,23 @@ func(api *API) CreateChannel(Name string) (id string, err error) {
 		err = errors.New(fmt.Sprintf(fatalFormat, reqData, err))
 		return
 	}
-	res, err := http.Post(url, "application/json", bytes.NewReader(buf))
-	// Close response body when reach end of function to free connection
-	defer res.Body.Close()
+	req, err := http.NewRequest("POST", url.String(), bytes.NewReader(buf))
+	if err != nil {
+		fatalFormat := "Unexpected error when creating POST request with JSON data `%s`: %v"
+		err = errors.New(fmt.Sprintf(fatalFormat, string(buf), err))
+	}
+	req.Header.Add("Content-Type", "application/json")
+	res, err := api.Cluster.Do(req)
 	if err != nil {
 		fatalFormat := "Unexpected error on create channel request (%v) at URL `%v` into JSON: `%v`"
-		err = errors.New(fmt.Sprintf(fatalFormat, reqData, url, err))
+		err = errors.New(fmt.Sprintf(fatalFormat, reqData, url.String(), err))
 		return
 	}
+	// Close response body when reach end of function to free connection
+	defer res.Body.Close()
 	if res == nil {
 		fatalFormat := "Unexpected empty response (%v) to create channel request (%v) at URL `%v`"
-		err = errors.New(fmt.Sprintf(fatalFormat, res, reqData, url))
+		err = errors.New(fmt.Sprintf(fatalFormat, res, reqData, url.String()))
 		return	
 	}
 	body, err := ioutil.ReadAll(res.Body)
@@ -78,22 +93,26 @@ type CreateSubscriptionResponse struct {
 }
 
 func(api *API) CreateSubscription(fromChannelId string, toChannelId string) error {
-	url := fmt.Sprintf("http://%s/v1/channels/%s/subscriptions", api.Host, fromChannelId)
+	url := url.URL{}
+	url.Path = fmt.Sprintf("/v1/channels/%s/subscriptions", fromChannelId)
 	reqData := &CreateSubscriptionRequest{toChannelId, time.Now().Unix()}
 	buf, err := json.Marshal(reqData)
 	if err != nil {
 		fatalFormat := "Unexpected error when marshalling CreateChannelRequest `%v` into JSON: `%v`"
 		return errors.New(fmt.Sprintf(fatalFormat, reqData, err))
 	}
-	req, err := http.NewRequest("PUT", url, bytes.NewReader(buf))
+	req, err := http.NewRequest("PUT", url.String(), bytes.NewReader(buf))
+	if err != nil {
+		fatalFormat := "Unexpected error when creating PUT request with JSON data `%s`: %v"
+		err = errors.New(fmt.Sprintf(fatalFormat, string(buf), err))
+	}
+	req.Header.Add("Content-Type", "application/json")
+	res, err := api.Cluster.Do(req)
 	if err != nil {
 		fatalFormat := "Unexpected error when create PUT request with data `%s` for submission " +
 		"on URL `%v`: `%v`"
-		return errors.New(fmt.Sprintf(fatalFormat, string(buf), url, err))
+		return errors.New(fmt.Sprintf(fatalFormat, string(buf), url.String(), err))
 	}
-	req.Header.Add("Content-Type", "application/json")
-	client := &http.Client{}
-	res, err := client.Do(req)
 	// Close response body when reach end of function to free connection
 	defer res.Body.Close()
 	if err != nil {
@@ -109,18 +128,23 @@ type Subscription struct {
 }
 
 func(api *API) GetSubscriptionsOfChannelWithId(id string) (channelIds []string, err error) {
-	url := fmt.Sprintf("http://%s/v1/channels/%s/subscriptions", api.Host, id)
-	fmt.Println(url)
-	res, err := http.Get(url)
-	// Close response body when reach end of function to free connection
-	defer res.Body.Close()
+	url := url.URL{}
+	url.Path = fmt.Sprintf("/v1/channels/%s/subscriptions", id)
+	req, err := http.NewRequest("GET", url.String(), nil)
+	if err != nil {
+		fatalFormat := "Unexpected error when creating GET request: %v"
+		err = errors.New(fmt.Sprintf(fatalFormat, err))
+	}
+	res, err := api.Cluster.Do(req)
 	if err != nil {
 		fatalFormat := "Unexpected error on subscriptions request at URL `%v`: `%v`"
-		err = errors.New(fmt.Sprintf(fatalFormat, url, err))
+		err = errors.New(fmt.Sprintf(fatalFormat, url.String(), err))
 	}
+	// Close response body when reach end of function to free connection
+	defer res.Body.Close()
 	if res == nil {
 		fatalFormat := "Unexpected empty response (%v) to subscriptions request at URL `%v`"
-		err = errors.New(fmt.Sprintf(fatalFormat, res, url))
+		err = errors.New(fmt.Sprintf(fatalFormat, res, url.String()))
 		return	
 	}
 	body, err := ioutil.ReadAll(res.Body)
