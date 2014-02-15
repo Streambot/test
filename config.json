@@ -1,8 +1,9 @@
 {
-	"hosts": ["localhost:8080", "localhost:8081"],
+	"api_hosts": ["localhost:8081", "localhost:8082"],
 	"sample_rate": 0.1,
 	"create_channel_throttle": 120,
 	"subscribe_channel_throttle": 100,
 	"get_subscription_throttle": 70,
-	"num_workers": 50
+	"num_workers": 50,
+	"subscriptionStatsLogfile": "/tmp/streambot-test-subscription-stats.data"
 }

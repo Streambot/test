@@ -12,7 +12,7 @@ import(
 	"github.com/mbiermann/go-cluster"
 )
 
-func NewAPI(hosts []string) (api *API, err error) {
+func NewAPI(hosts []string, stats *Statter) (api *API, err error) {
 	config := &cluster.ClusterConfig{Hosts:hosts}
 	cluster, err := cluster.NewCluster(config)
 	if err != nil {
@@ -20,12 +20,14 @@ func NewAPI(hosts []string) (api *API, err error) {
 		return
 	}
 	api = new(API)
+	api.Stats = stats
 	api.Cluster = cluster
 	return
 }
 
 type API struct {
 	Cluster *cluster.Cluster
+	Stats 	*Statter
 }
 
 type CreateChannelRequest struct {
@@ -37,6 +39,7 @@ type CreateChannelResponse struct {
 }
 
 func(api *API) CreateChannel(Name string) (id string, err error) {
+	api.Stats.Count("webservice.CreateChannel")
 	url := url.URL{}
 	url.Path = "/v1/channels"
 	reqData := &CreateChannelRequest{Name}
@@ -46,14 +49,16 @@ func(api *API) CreateChannel(Name string) (id string, err error) {
 		err = errors.New(fmt.Sprintf(fatalFormat, reqData, err))
 		return
 	}
-	req, err := http.NewRequest("POST", url.String(), bytes.NewReader(buf))
+	req, err := http.NewRequest("PUT", url.String(), bytes.NewReader(buf))
 	if err != nil {
 		fatalFormat := "Unexpected error when creating POST request with JSON data `%s`: %v"
 		err = errors.New(fmt.Sprintf(fatalFormat, string(buf), err))
+		return
 	}
 	req.Header.Add("Content-Type", "application/json")
 	res, err := api.Cluster.Do(req)
 	if err != nil {
+		api.Stats.Count("webservice.errors.CreateChannel")
 		fatalFormat := "Unexpected error on create channel request (%v) at URL `%v` into JSON: `%v`"
 		err = errors.New(fmt.Sprintf(fatalFormat, reqData, url.String(), err))
 		return
@@ -61,6 +66,7 @@ func(api *API) CreateChannel(Name string) (id string, err error) {
 	// Close response body when reach end of function to free connection
 	defer res.Body.Close()
 	if res == nil {
+		api.Stats.Count("webservice.empty.CreateChannel")
 		fatalFormat := "Unexpected empty response (%v) to create channel request (%v) at URL `%v`"
 		err = errors.New(fmt.Sprintf(fatalFormat, res, reqData, url.String()))
 		return	
@@ -93,6 +99,7 @@ type CreateSubscriptionResponse struct {
 }
 
 func(api *API) CreateSubscription(fromChannelId string, toChannelId string) error {
+	api.Stats.Count("webservice.CreateSubscription")
 	url := url.URL{}
 	url.Path = fmt.Sprintf("/v1/channels/%s/subscriptions", fromChannelId)
 	reqData := &CreateSubscriptionRequest{toChannelId, time.Now().Unix()}
@@ -101,10 +108,11 @@ func(api *API) CreateSubscription(fromChannelId string, toChannelId string) erro
 		fatalFormat := "Unexpected error when marshalling CreateChannelRequest `%v` into JSON: `%v`"
 		return errors.New(fmt.Sprintf(fatalFormat, reqData, err))
 	}
-	req, err := http.NewRequest("PUT", url.String(), bytes.NewReader(buf))
+	req, err := http.NewRequest("POST", url.String(), bytes.NewReader(buf))
 	if err != nil {
+		api.Stats.Count("webservice.errors.CreateSubscription")
 		fatalFormat := "Unexpected error when creating PUT request with JSON data `%s`: %v"
-		err = errors.New(fmt.Sprintf(fatalFormat, string(buf), err))
+		return errors.New(fmt.Sprintf(fatalFormat, string(buf), err))
 	}
 	req.Header.Add("Content-Type", "application/json")
 	res, err := api.Cluster.Do(req)
@@ -128,6 +136,7 @@ type Subscription struct {
 }
 
 func(api *API) GetSubscriptionsOfChannelWithId(id string) (channelIds []string, err error) {
+	api.Stats.Count("webservice.GetSubscriptionsOfChannelWithId")
 	url := url.URL{}
 	url.Path = fmt.Sprintf("/v1/channels/%s/subscriptions", id)
 	req, err := http.NewRequest("GET", url.String(), nil)
@@ -137,12 +146,15 @@ func(api *API) GetSubscriptionsOfChannelWithId(id string) (channelIds []string, 
 	}
 	res, err := api.Cluster.Do(req)
 	if err != nil {
+		api.Stats.Count("webservice.errors.GetSubscriptionsOfChannelWithId")
 		fatalFormat := "Unexpected error on subscriptions request at URL `%v`: `%v`"
 		err = errors.New(fmt.Sprintf(fatalFormat, url.String(), err))
+		return
 	}
 	// Close response body when reach end of function to free connection
 	defer res.Body.Close()
 	if res == nil {
+		api.Stats.Count("webservice.empty.GetSubscriptionsOfChannelWithId")
 		fatalFormat := "Unexpected empty response (%v) to subscriptions request at URL `%v`"
 		err = errors.New(fmt.Sprintf(fatalFormat, res, url.String()))
 		return	

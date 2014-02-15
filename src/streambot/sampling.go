@@ -17,14 +17,16 @@ type Sampler struct {
 	MinuteSlices		map[int64][]string
 	MinuteSlicesMutex	*sync.RWMutex
 	Minutes 			[]int64
+	Stats				*Statter
 }
 
-func NewSampler(sampleRate float64) *Sampler {
+func NewSampler(sampleRate float64, stats *Statter) *Sampler {
 	s := new(Sampler)
 	s.MinuteSlices = map[int64][]string{}
 	s.MinuteSlicesMutex = new(sync.RWMutex)
 	s.Minutes = []int64{}
 	s.SampleRate = sampleRate
+	s.Stats = stats
 	return s
 }
 
@@ -33,6 +35,7 @@ func (sampler *Sampler)ScrapMinuteSlice(minuteSliceKey int64) {
 	if slice == nil {
 		return
 	}
+	sampler.Stats.Count("sampling.scrap_minute_slice")
 	sliceLen := len(slice)
 	numSelects := int(math.Floor((float64(sliceLen) * sampler.SampleRate) + .5))
 	offset := int(math.Floor((float64(sliceLen)/float64(numSelects)) + .5))
@@ -47,6 +50,7 @@ func (sampler *Sampler)ScrapMinuteSlice(minuteSliceKey int64) {
 }
 
 func (sampler *Sampler)SampleId(id string) {
+	sampler.Stats.Count("sampling.sample")
 	sampler.MinuteSlicesMutex.Lock()
 	minuteSliceKey := time.Now().Unix()/60
 	if len(sampler.MinuteSlices[minuteSliceKey]) == 0 {

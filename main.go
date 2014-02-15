@@ -6,7 +6,6 @@ import(
     "github.com/op/go-logging"
     "github.com/jessevdk/go-flags"
     "code.google.com/p/go-uuid/uuid"
-    "net"
     "fmt"
     "encoding/json"
     "io/ioutil"
@@ -24,16 +23,17 @@ type Options struct {
 }
 
 type TestConfiguration struct {
-	Hosts 						[]string 	`json:"hosts"`
+	APIHosts 					[]string 	`json:"api_hosts"`
 	CreateChannelThrottle 		uint16 		`json:"create_channel_throttle"`
 	SubscribeChannelThrottle 	uint16 		`json:"subscribe_channel_throttle"`
 	SampleRate					float64 	`json:"sample_rate"`
 	GetSubscriptionThrottle 	uint16  	`json:"get_subscription_throttle"`
 	NumWorkers					float64 	`json:"num_workers"`
+	GetSubsStatsLogfile			string 		`json:"subscriptionStatsLogfile"`
 }
 
 func(config *TestConfiguration) Valid() bool {
-	return len(config.Hosts) > 0 && config.SampleRate > 0
+	return len(config.APIHosts) > 0 && config.SampleRate > 0
 }
 
 func ReadConfig(file string) *TestConfiguration {
@@ -106,31 +106,40 @@ type TestRunner struct {
 	Workers					[]*Worker
 	ChannelIds 				[]string
 	SubscribingChannelIds	[]string
-	StatConn 				net.Conn
+	Stats 					* streambot.Statter
 	Config					* TestConfiguration
 	ChannelSampler 			* streambot.Sampler
 	SubscriptionSampler 	* streambot.Sampler
+	GetSubsStatsLogfile		* os.File
 }
 
 func NewTestRunner(config *TestConfiguration) (r *TestRunner, err error) {
-	api, err := streambot.NewAPI(config.Hosts)
+	file, err := os.OpenFile(config.GetSubsStatsLogfile, os.O_CREATE|os.O_RDWR|os.O_APPEND, 0660);
+	if err != nil {
+		format := "Unexpected error when creating stats log file for subscription retrievals at `%s`: %v"
+		err = errors.New(fmt.Sprintf(format, config.GetSubsStatsLogfile, err))
+		return
+	}
+	stats, err := streambot.NewLocalStatsDStatter()
+	if err != nil {
+		err = errors.New(fmt.Sprintf("TestRunner Error when instantiate statter: %v", err))
+		return
+	}
+	api, err := streambot.NewAPI(config.APIHosts, stats)
 	if err != nil {
 		err = errors.New(fmt.Sprintf("Unexpected error when initializing test API client: %v", err))
 		return
 	}
 	r = new(TestRunner)
+	r.GetSubsStatsLogfile = file
+	r.Stats = stats
 	r.API = api
 	r.ChannelIds = []string{}
 	r.SubscribingChannelIds = []string{}
 	r.Config = config
-	r.ChannelSampler = streambot.NewSampler(config.SampleRate)
-	r.SubscriptionSampler = streambot.NewSampler(config.SampleRate)
+	r.ChannelSampler = streambot.NewSampler(config.SampleRate, stats)
+	r.SubscriptionSampler = streambot.NewSampler(config.SampleRate, stats)
 	r.Workers = []*Worker{}
-	conn, err := net.Dial("udp", ":8125")
-	if err != nil {
-		log.Error("Error when instantiate UDP statting connection: %v", err)
-	}
-	r.StatConn = conn
 	return
 }
 
@@ -150,13 +159,13 @@ func(w *Worker) Work() {
 			var throttle uint16
 			switch taskIdx {
 			case 0: 
-				w.Runner.CreateChannel()
+				go w.Runner.CreateChannel()
 				throttle = w.Runner.Config.CreateChannelThrottle
 			case 1: 
-				w.Runner.CreateSubscription()
+				go w.Runner.CreateSubscription()
 				throttle = w.Runner.Config.SubscribeChannelThrottle
 			case 2: 
-				w.Runner.GetSubscriptions()
+				go w.Runner.GetSubscriptions()
 				throttle = w.Runner.Config.GetSubscriptionThrottle
 			}
 			time.Sleep(time.Duration(int64(throttle) * 1000 * 1000))
@@ -177,15 +186,15 @@ func (runner *TestRunner) CreateChannel() {
 	log.Debug("CreateChannel took %d", duration)
 	statSigns := []string{}
 	if err != nil {
-		statSigns = append(statSigns, "test.TestRunner.errors.all")
-		statSigns = append(statSigns, "test.TestRunner.errors.NewChannel")
+		statSigns = append(statSigns, "test_runner.errors.all")
+		statSigns = append(statSigns, "test_runner.errors.NewChannel")
 		log.Fatalf("Error when create channel: %v", err)
 	} else {
-		statSigns = append(statSigns, "test.TestRunner.NewChannel")
+		statSigns = append(statSigns, "test_runner.NewChannel")
 		runner.ChannelSampler.SampleId(id)
 	}
 	for _, statSign := range statSigns {
-		fmt.Fprintln(runner.StatConn, fmt.Sprintf("%s:1|c", statSign))
+		runner.Stats.Count(statSign)
 	}
 }
 
@@ -208,14 +217,14 @@ func (runner *TestRunner) CreateSubscription() {
 	log.Debug("CreateSubscription took %d", duration)
 	statSigns := []string{}
 	if err != nil {
-		statSigns = append(statSigns, "test.TestRunner.errors.all")
-		statSigns = append(statSigns, "test.TestRunner.errors.NewSubscription")
+		statSigns = append(statSigns, "test_runner.errors.all")
+		statSigns = append(statSigns, "test_runner.errors.NewSubscription")
 	} else {
-		statSigns = append(statSigns, "test.TestRunner.NewSubscription")
+		statSigns = append(statSigns, "test_runner.NewSubscription")
 		runner.SubscriptionSampler.SampleId(fromChannelId)
 	}
 	for _, statSign := range statSigns {
-		fmt.Fprintln(runner.StatConn, fmt.Sprintf("%s:1|c", statSign))
+		runner.Stats.Count(statSign)
 	}
 }
 
@@ -226,26 +235,31 @@ func (runner *TestRunner) GetSubscriptions() {
 		return
 	}
 	fmt.Println(fmt.Sprintf("Get subscriptions channel ID is %s", id))
+	beforeDB := time.Now()	
 	channelIds, err := runner.API.GetSubscriptionsOfChannelWithId(id)
+	afterDB := time.Now()
+	// Calculate database call duration and track in statter
+	duration := afterDB.Sub(beforeDB)/time.Millisecond
 	log.Debug(fmt.Sprintf("Get subscriptions of channel `%s`", id))
 	statSigns := []string{}
 	if err != nil {
 		log.Fatalf(fmt.Sprintf("Subscriptions of channel error `%v`", err))
-		statSigns = append(statSigns, "test.TestRunner.errors.all")
-		statSigns = append(statSigns, "test.TestRunner.errors.GetSubscriptions")
+		statSigns = append(statSigns, "test_runner.errors.all")
+		statSigns = append(statSigns, "test_runner.errors.GetSubscriptions")
 	} else {
-		log.Debug(fmt.Sprintf("Subscriptions of channel `%v`", channelIds))
-		statSigns = append(statSigns, "test.TestRunner.GetSubscriptions")
+		log.Debug(fmt.Sprintf("Channel %s has %d subscriptions", id, len(channelIds)))
+  		runner.GetSubsStatsLogfile.WriteString(fmt.Sprintf("%d %d %d\n", afterDB.UnixNano(), len(channelIds), duration))
+		statSigns = append(statSigns, "test_runner.GetSubscriptions")
 		if channelIds == nil {
-			statSigns = append(statSigns, "test.TestRunner.errors.GetSubscriptionsEmpty")
+			statSigns = append(statSigns, "test_runner.errors.GetSubscriptionsEmpty")
 		} else if len(channelIds) == 0 {
-			statSigns = append(statSigns, "test.TestRunner.errors.GetSubscriptionsZero")
+			statSigns = append(statSigns, "test_runner.errors.GetSubscriptionsZero")
 		} else {
-			statSigns = append(statSigns, fmt.Sprintf("test.TestRunner.NumSubscriptions.%d", len(channelIds)))
+			runner.Stats.Time("test_runner.GetSubscriptionsResponseSpeed", int(duration)/len(channelIds))
 		}
 	}
 	for _, statSign := range statSigns {
-		fmt.Fprintln(runner.StatConn, fmt.Sprintf("%s:1|c", statSign))
+		runner.Stats.Count(statSign)
 	}
 }
 
