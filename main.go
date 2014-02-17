@@ -152,25 +152,25 @@ type Worker struct {
 	Runner *TestRunner
 }
 
+func ThrottleDuration(throttle uint16) time.Duration {
+	return time.Duration(int64(throttle) * 1000 * 1000)
+}
+
+type Run func
+
+func(w *Worker) ThrottledInfiniteRun(run Run, throttle uint16) {
+	time.AfterFunc(ThrottleDuration(throttle), func() {
+		run()
+		ThrottledInfiniteRun(run, throttle)
+	})	
+}
+
 func(w *Worker) Work() {
 	go func(){
-		for {
-			taskIdx := rand.Intn(3)
-			var throttle uint16
-			switch taskIdx {
-			case 0: 
-				go w.Runner.CreateChannel()
-				throttle = w.Runner.Config.CreateChannelThrottle
-			case 1: 
-				go w.Runner.CreateSubscription()
-				throttle = w.Runner.Config.SubscribeChannelThrottle
-			case 2: 
-				go w.Runner.GetSubscriptions()
-				throttle = w.Runner.Config.GetSubscriptionThrottle
-			}
-			time.Sleep(time.Duration(int64(throttle) * 1000 * 1000))
-			
-		}
+		config := w.runner.Config
+		ThrottledInfiniteRun(w.CreateChannel, config.CreateChannelThrottle)
+		ThrottledInfiniteRun(w.CreateSubscription, config.SubscribeChannelThrottle)
+		ThrottledInfiniteRun(w.GetSubscriptions, config.GetSubscriptionThrottle)
 	}()
 }
 
